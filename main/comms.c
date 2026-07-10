@@ -3,172 +3,230 @@
 #include "Config.h"
 #include "common/mavlink.h"
 #include "esp_log.h"
-#include "geom.h"
 #include "lwip/sockets.h"
+#include "lwip/sys.h"
 #include "params.h"
 #include "telemetry.h"
 
+static const char *TAG = "COMMS";
 #define MAVLINK_TX_CHAN MAVLINK_COMM_0
 #define MAVLINK_RX_CHAN MAVLINK_COMM_1
 
+static const uint8_t MAV_SYSTEM_ID = 1;
+static const uint8_t MAV_COMPONENT_ID = MAV_COMP_ID_AUTOPILOT1;
+static const uint8_t MAV_DRONE_TYPE = MAV_TYPE_QUADROTOR;
+static const uint8_t MAV_AUTOPILOT_TYPE = MAV_AUTOPILOT_GENERIC;
+
 static int udp_socket;
+static struct sockaddr_in local_addr;
 static struct sockaddr_in dest_addr;
-static SemaphoreHandle_t mavlink_mutex;
 
-static const uint8_t system_id = 1;
-static const uint8_t component_id = MAV_COMP_ID_AUTOPILOT1;
+static SemaphoreHandle_t mav_mutex;
 
-static bool armed = false;
+static void mav_lock(void) { xSemaphoreTake(mav_mutex, portMAX_DELAY); };
 
-static TaskHandle_t s_tx_task_handle = NULL;
-static TaskHandle_t s_rx_task_handle = NULL;
+static void mav_unlock(void) { xSemaphoreGive(mav_mutex); }
 
-static void mavlink_lock() { xSemaphoreTake(mavlink_mutex, portMAX_DELAY); }
-
-static void mavlink_unlock() { xSemaphoreGive(mavlink_mutex); }
-
-static void mavlink_sendto(mavlink_message_t* msg) {
+static void mav_send(const mavlink_message_t *msg) {
   uint8_t buf[MAVLINK_MAX_PACKET_LEN];
   uint16_t len = mavlink_msg_to_send_buffer(buf, msg);
-  sendto(udp_socket, buf, len, 0, (struct sockaddr*)&dest_addr,
-         sizeof(dest_addr));
+  sendto(udp_socket, buf, len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 }
 
-static uint32_t now_ms() { return xTaskGetTickCount() * portTICK_PERIOD_MS; }
+static TaskHandle_t tx_task_handle;
+static TaskHandle_t rx_task_handle;
 
-static bool pack_heartbeat(mavlink_message_t* msg) {
-  uint8_t base_mode = MAV_MODE_FLAG_MANUAL_INPUT_ENABLED;
-  uint8_t sys_state = MAV_STATE_STANDBY;
-
-  if (armed) {
-    base_mode |= MAV_MODE_FLAG_SAFETY_ARMED;
-    sys_state = MAV_STATE_ACTIVE;
-  }
-
-  mavlink_msg_heartbeat_pack(system_id, component_id, msg, MAV_TYPE_QUADROTOR,
-                             MAV_AUTOPILOT_GENERIC, base_mode, 0, sys_state);
-  return true;
-}
-
-// TODO: No battery - no actual status. Stub data for now
-static bool pack_sys_status(mavlink_message_t* msg) {
-  uint32_t sensors_present =
-      MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
-  uint32_t sensors_enabled =
-      MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
-  uint32_t sensors_health =
-      MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
-  mavlink_msg_sys_status_pack(system_id, component_id, msg, sensors_present,
-                              sensors_enabled, sensors_health, 0, 12000, -1, -1,
-                              0, 0, 0, 0, 0, 0, 0, 0, 0);
-  return true;
-}
-
-static bool pack_attitude(mavlink_message_t* msg) {
-  telemetry_data_t d;
-  if (xQueuePeek(telemetry_queue, &d, 0) != pdTRUE) return false;
-  mavlink_msg_attitude_pack(system_id, component_id, msg, d.timestamp_ms,
-                            d.roll, d.pitch, d.yaw, d.vroll * G_DEG_TO_RAD,
-                            d.vpitch * G_DEG_TO_RAD, d.vyaw * G_DEG_TO_RAD);
-  return true;
-}
+typedef bool (*tx_handler_fn)(mavlink_message_t *msg);
+typedef bool (*rx_handler_fn)(const mavlink_message_t *msg);
 
 typedef struct {
-  uint32_t interval_ms;
+  uint16_t interval_ms;
   uint32_t last_sent_ms;
-  bool (*pack)(mavlink_message_t* msg);
-} tx_stream_t;
+  tx_handler_fn handler_fn;
+} tx_handler_t;
 
-static tx_stream_t tx_streams[] = {
+typedef struct {
+  uint32_t mav_msg_id;
+  rx_handler_fn handler_fn;
+} rx_handler_t;
+
+static bool mav_pack_heartbeat(mavlink_message_t *msg) {
+  mavlink_msg_heartbeat_pack(
+      MAV_SYSTEM_ID,
+      MAV_COMPONENT_ID,
+      msg,
+      MAV_DRONE_TYPE,
+      MAV_AUTOPILOT_TYPE,
+      MAV_MODE_FLAG_MANUAL_INPUT_ENABLED,
+      0,
+      MAV_STATE_STANDBY);
+  return true;
+};
+
+static bool mav_pack_attitude(mavlink_message_t *msg) {
+  telemetry_data_t data;
+  if (xQueuePeek(telemetry_queue, &data, 0) != pdTRUE)
+    return false;
+  mavlink_msg_attitude_pack(
+      MAV_SYSTEM_ID,
+      MAV_COMPONENT_ID,
+      msg,
+      data.timestamp_ms,
+      data.roll,
+      data.pitch,
+      data.yaw,
+      data.vroll,
+      data.vpitch,
+      data.vyaw);
+  return true;
+}
+
+static bool mav_pack_sys_status(mavlink_message_t *msg) {
+
+  uint32_t sensors_present = MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
+  uint32_t sensors_enabled = MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
+  uint32_t sensors_health = MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
+  mavlink_msg_sys_status_pack(
+      MAV_SYSTEM_ID,
+      MAV_COMPONENT_ID,
+      msg,
+      sensors_present,
+      sensors_enabled,
+      sensors_health,
+      0,
+      12000,
+      -1,
+      -1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0);
+  return true;
+}
+
+static bool mav_pack_status_text(mavlink_message_t *msg, const char *text) {
+  mavlink_msg_statustext_pack(MAV_SYSTEM_ID, MAV_COMPONENT_ID, msg, MAV_SEVERITY_WARNING, text, 0, 0);
+  return true;
+}
+
+static void send_param_value(const params_entry_t *p, uint16_t idx) {
+  mavlink_message_t msg;
+  mav_lock();
+  mavlink_msg_param_value_pack_chan(
+      MAV_SYSTEM_ID,
+      MAV_COMPONENT_ID,
+      MAVLINK_RX_CHAN,
+      &msg,
+      p->name,
+      *(p->value_p),
+      MAV_PARAM_TYPE_REAL32,
+      PARAMS_COUNT,
+      idx);
+  mav_send(&msg);
+  mav_unlock();
+}
+
+static bool handle_param_request_list(const mavlink_message_t *msg) {
+  for (uint16_t i = 0; i < PARAMS_COUNT; i++) {
+    send_param_value(&params_list[i], i);
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  return true;
+}
+
+static bool handle_param_request_read(const mavlink_message_t *msg) {
+  mavlink_param_request_read_t decoded;
+  mavlink_msg_param_request_read_decode(msg, &decoded);
+  params_entry_t param;
+  if (param_get(decoded.param_id, &param) != true) {
+    mavlink_message_t msg;
+    char buf[50];
+    snprintf(buf, sizeof(buf), "Unknown parameter: \'%s\'", decoded.param_id);
+    mav_pack_status_text(&msg, buf);
+    mav_lock();
+    mav_send(&msg);
+    mav_lock();
+    return false;
+  }
+  send_param_value(&param, decoded.param_index);
+  return true;
+}
+
+static bool handle_param_set(const mavlink_message_t *msg) {
+  mavlink_param_set_t decoded;
+  mavlink_msg_param_set_decode(msg, &decoded);
+  uint16_t idx = UINT16_MAX;
+  params_entry_t param;
+  bool result = param_set(decoded.param_id, decoded.param_value, &param, &idx);
+  if (idx != UINT16_MAX) {
+    send_param_value(&param, idx);
+  }
+  return result;
+}
+
+static tx_handler_t tx_handler_table[] = {
     {
         .interval_ms = 1000,
         .last_sent_ms = 0,
-        .pack = pack_heartbeat,
+        .handler_fn = mav_pack_heartbeat,
+    },
+    {
+        .interval_ms = 20,
+        .last_sent_ms = 0,
+        .handler_fn = mav_pack_attitude,
     },
     {
         .interval_ms = 1000,
         .last_sent_ms = 0,
-        .pack = pack_sys_status,
-    },
-    {
-        .interval_ms = 50,
-        .last_sent_ms = 0,
-        .pack = pack_attitude,
+        .handler_fn = mav_pack_sys_status,
     },
 };
 
-#define TX_STREAM_COUNT (sizeof(tx_streams) / sizeof(tx_stream_t))
+#define TX_HANDLER_COUNT sizeof(tx_handler_table) / sizeof(tx_handler_t)
 
-static void mavlink_tx_task(void* pvParameters) {
-  uint32_t now;
+static rx_handler_t rx_handler_table[] = {
+    {
+        .mav_msg_id = MAVLINK_MSG_ID_PARAM_REQUEST_LIST,
+        .handler_fn = handle_param_request_list,
+    },
+    {
+        .mav_msg_id = MAVLINK_MSG_ID_PARAM_REQUEST_READ,
+        .handler_fn = handle_param_request_read,
+    },
+    {
+        .mav_msg_id = MAVLINK_MSG_ID_PARAM_SET,
+        .handler_fn = handle_param_set,
+    },
+};
+
+#define RX_HANDLER_COUNT sizeof(rx_handler_table) / sizeof(rx_handler_t)
+
+static void tx_task(void *pvParameters) {
+  uint32_t now_ms;
+  mavlink_message_t msg;
   while (1) {
-    now = now_ms();
-    for (size_t i = 0; i < TX_STREAM_COUNT; i++) {
-      tx_stream_t* s = &tx_streams[i];
-      if (now - s->last_sent_ms < s->interval_ms) continue;
-      mavlink_message_t msg;
-      mavlink_lock();
-      bool ready = s->pack(&msg);
-      if (ready) mavlink_sendto(&msg);
-      mavlink_unlock();
-      s->last_sent_ms = now;
+    now_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+    for (size_t i = 0; i < TX_HANDLER_COUNT; i++) {
+      tx_handler_t handler = tx_handler_table[i];
+      if (now_ms - handler.last_sent_ms < handler.interval_ms)
+        continue;
+      if (handler.handler_fn(&msg) != true) {
+        ESP_LOGW(TAG, "Failed to send tx message");
+      };
+      mav_lock();
+      mav_send(&msg);
+      mav_unlock();
     }
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
 
-static void send_param_value(params_entry_t p, uint16_t index) {
-  mavlink_message_t msg;
-  mavlink_lock();
-  mavlink_msg_param_value_pack_chan(system_id, component_id, MAVLINK_TX_CHAN,
-                                    &msg, p.name, *p.value_p,
-                                    MAV_PARAM_TYPE_REAL32, params_count, index);
-  mavlink_sendto(&msg);
-  mavlink_unlock();
-}
-
-static void handle_param_request_list(mavlink_message_t* msg) {
-  for (uint16_t i = 0; i < params_count; i++) {
-    send_param_value(params_list[i], i);
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-}
-
-static void handle_param_set(mavlink_message_t* msg) {
-  mavlink_param_set_t buf;
-  mavlink_msg_param_set_decode(msg, &buf);
-  uint16_t id = 0;
-  params_entry_t p;
-  bool ok = param_set(buf.param_id, buf.param_value, &p, &id);
-  if (ok) {
-    send_param_value(p, id);
-  }
-}
-
-typedef void (*mavlink_handler_fn_t)(mavlink_message_t* msg);
-
-typedef struct {
-  uint32_t msg_id;
-  mavlink_handler_fn_t handler;
-} rx_dispatch_entry_t;
-
-static const rx_dispatch_entry_t rx_dispatch_table[] = {
-    {MAVLINK_MSG_ID_PARAM_REQUEST_LIST, handle_param_request_list},
-    {MAVLINK_MSG_ID_PARAM_SET, handle_param_set}};
-#define RX_DISPATCH_COUNT \
-  (sizeof(rx_dispatch_table) / sizeof(rx_dispatch_table[0]))
-
-static void dispatch_mavlink_message(mavlink_message_t* msg) {
-  for (size_t i = 0; i < RX_DISPATCH_COUNT; i++) {
-    if (rx_dispatch_table[i].msg_id == msg->msgid) {
-      rx_dispatch_table[i].handler(msg);
-      return;
-    }
-  }
-}
-
-static void mavlink_rx_task(void* pvParameters) {
-  (void)pvParameters;
+static void rx_task(void *pvParameters) {
   uint8_t rx_buf[512];
   mavlink_message_t msg;
   mavlink_status_t status;
@@ -176,41 +234,45 @@ static void mavlink_rx_task(void* pvParameters) {
   while (1) {
     struct sockaddr_in src_addr;
     socklen_t src_len = sizeof(src_addr);
-    int n = recvfrom(udp_socket, rx_buf, sizeof(rx_buf), 0,
-                     (struct sockaddr*)&src_addr, &src_len);
+    int n = recvfrom(udp_socket, rx_buf, sizeof(rx_buf), 0, (struct sockaddr *)&src_addr, &src_len);
     if (n < 0) {
-      ESP_LOGW(CFG_LOG_TAG, "recvfrom error: errno %d", errno);
+      ESP_LOGW(TAG, "recvfrom error: errno %d", errno);
       continue;
     }
     for (int i = 0; i < n; i++) {
       if (mavlink_parse_char(MAVLINK_RX_CHAN, rx_buf[i], &msg, &status)) {
-        dispatch_mavlink_message(&msg);
+        for (size_t i = 0; i < RX_HANDLER_COUNT; i++) {
+          if (rx_handler_table[i].mav_msg_id == msg.msgid) {
+            if (rx_handler_table[i].handler_fn(&msg) != true) {
+              ESP_LOGW(TAG, "RX handler error on %d", msg.msgid);
+            };
+            break;
+          }
+        }
       }
     }
   }
 }
 
 TaskHandle_t communications_start() {
-  mavlink_mutex = xSemaphoreCreateMutex();
-  if (mavlink_mutex == NULL) {
-    ESP_LOGE(CFG_LOG_TAG, "Failed to create mavlink mutex");
+  mav_mutex = xSemaphoreCreateMutex();
+  if (mav_mutex == NULL) {
+    ESP_LOGE(TAG, "Failed to create mavlink mutex");
     return NULL;
   }
 
   udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (udp_socket < 0) {
-    ESP_LOGE(CFG_LOG_TAG, "UDP socket error");
+    ESP_LOGE(TAG, "UDP socket error");
     return NULL;
   }
 
-  struct sockaddr_in local_addr = {
-      .sin_family = AF_INET,
-      .sin_addr.s_addr = htonl(INADDR_ANY),
-      .sin_port = htons(CFG_HOST_PORT),
-  };
-  if (bind(udp_socket, (struct sockaddr*)&local_addr, sizeof(local_addr)) !=
-      0) {
-    ESP_LOGE(CFG_LOG_TAG, "UDP bind error: errno %d", errno);
+  local_addr.sin_family = AF_INET;
+  local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  local_addr.sin_port = htons(CFG_HOST_PORT);
+
+  if (bind(udp_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) != 0) {
+    ESP_LOGE(TAG, "UDP bind error: errno %d", errno);
     return NULL;
   }
 
@@ -218,20 +280,18 @@ TaskHandle_t communications_start() {
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons(CFG_HOST_PORT);
 
-  BaseType_t ret = xTaskCreatePinnedToCore(mavlink_tx_task, "mavlink_tx", 3072,
-                                           NULL, 20, &s_tx_task_handle, 1);
+  BaseType_t ret = xTaskCreatePinnedToCore(tx_task, "mavlink_tx", 3072, NULL, 20, &tx_task_handle, 0);
   if (ret != pdPASS) {
-    ESP_LOGE(CFG_LOG_TAG, "Failed to create TX task");
+    ESP_LOGE(TAG, "Failed to create TX task");
     return NULL;
   }
 
-  ret = xTaskCreatePinnedToCore(mavlink_rx_task, "mavlink_rx", 4096, NULL, 18,
-                                &s_rx_task_handle, 1);
+  ret = xTaskCreatePinnedToCore(rx_task, "mavlink_rx", 4096, NULL, 18, &rx_task_handle, 0);
   if (ret != pdPASS) {
-    ESP_LOGE(CFG_LOG_TAG, "Failed to create RX task");
-    vTaskDelete(s_tx_task_handle);
+    ESP_LOGE(TAG, "Failed to create RX task");
+    vTaskDelete(tx_task_handle);
     return NULL;
   }
 
-  return s_tx_task_handle;
+  return tx_task_handle;
 }

@@ -52,7 +52,6 @@ static void get_correction_speed(quat_t* orientation,
   }
 
   v_mult(&angular_vel, orient_err_angle * params_config.pitch_gain_kp);
-  printf("%f\n", params_config.pitch_gain_kp);
   *out_correction_speed = angular_vel;
 }
 

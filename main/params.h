@@ -29,7 +29,7 @@ extern params_config_t params_config;
 
 extern const params_entry_t params_list[];
 
-extern const size_t params_count;
+extern const size_t PARAMS_COUNT;
 
 esp_err_t params_init(void);
 
