@@ -126,6 +126,7 @@ bool param_get(const char* name, params_entry_t* p) {
   for (size_t i = 0; i < params_count; i++) {
     if (strncmp(params_list[i].name, name, PARAM_NAME_LEN) == 0) {
       memcpy(p, &params_list[i], sizeof(params_entry_t));
+      return true;
     }
   }
   return false;
