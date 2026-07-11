@@ -76,8 +76,9 @@ static bool mav_pack_heartbeat(mavlink_message_t *msg) {
 
 static bool mav_pack_attitude(mavlink_message_t *msg) {
   telemetry_data_t data;
-  if (xQueuePeek(telemetry_queue, &data, 0) != pdTRUE)
+  if (xQueuePeek(telemetry_queue, &data, 0) != pdTRUE) {
     return false;
+  }
   mavlink_msg_attitude_pack(MAV_SYSTEM_ID,
                             MAV_COMPONENT_ID,
                             msg,
@@ -121,6 +122,10 @@ static bool mav_pack_sys_status(mavlink_message_t *msg) {
 static bool mav_pack_status_text(mavlink_message_t *msg, const char *text) {
   mavlink_msg_statustext_pack(MAV_SYSTEM_ID, MAV_COMPONENT_ID, msg, MAV_SEVERITY_WARNING, text, 0, 0);
   return true;
+}
+
+static void handle_heartbeat(const mavlink_message_t *msg) {
+
 }
 
 static void send_param_value(const params_entry_t *p, const uint16_t idx) {
@@ -168,7 +173,8 @@ static bool handle_param_request_read(const mavlink_message_t *msg) {
 static void send_command_ack(const uint16_t cmd_id, const uint8_t result, const uint8_t percentage) {
   mavlink_message_t msg;
   mav_lock();
-  mavlink_msg_command_ack_pack_chan(MAV_SYSTEM_ID, MAV_COMPONENT_ID, MAVLINK_RX_CHAN,  &msg, cmd_id, result, percentage, 0, 0, 0);
+  mavlink_msg_command_ack_pack_chan(
+      MAV_SYSTEM_ID, MAV_COMPONENT_ID, MAVLINK_RX_CHAN, &msg, cmd_id, result, percentage, 0, 0, 0);
   mav_send(&msg);
   mav_unlock();
 }
@@ -205,7 +211,7 @@ static tx_handler_t tx_handler_table[] = {
         .handler_fn = mav_pack_heartbeat,
     },
     {
-        .interval_ms = 20,
+        .interval_ms = 100,
         .last_sent_ms = 0,
         .handler_fn = mav_pack_attitude,
     },
@@ -270,7 +276,7 @@ static void tx_task(void *pvParameters) {
         continue;
       handler->last_sent_ms = now_ms;
       if (handler->handler_fn(&msg) != true) {
-        ESP_LOGW(TAG, "Failed to send tx message, handler: %d", i);
+        ESP_LOGW(TAG, "Failed to send tx message: handler %d", i);
       };
       mav_lock();
       mav_send(&msg);
@@ -290,7 +296,7 @@ static void rx_task(void *pvParameters) {
     socklen_t src_len = sizeof(src_addr);
     int n = recvfrom(udp_socket, rx_buf, sizeof(rx_buf), 0, (struct sockaddr *)&src_addr, &src_len);
     if (n < 0) {
-      ESP_LOGW(TAG, "recvfrom error: errno %d", errno);
+      ESP_LOGW(TAG, "Failed to receive rx message: errno %d", errno);
       continue;
     }
     for (int i = 0; i < n; i++) {
@@ -298,7 +304,7 @@ static void rx_task(void *pvParameters) {
         for (size_t j = 0; j < RX_HANDLER_COUNT; j++) {
           if (rx_handler_table[j].mav_msg_id == msg.msgid) {
             if (rx_handler_table[j].handler_fn(&msg) != true) {
-              ESP_LOGW(TAG, "RX handler error on %d", msg.msgid);
+              ESP_LOGW(TAG, "Failed to process rx message: msg_id %d", msg.msgid);
             };
             break;
           }
