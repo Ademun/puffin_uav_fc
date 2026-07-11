@@ -12,10 +12,10 @@ static const char *TAG = "COMMS";
 #define MAVLINK_TX_CHAN MAVLINK_COMM_0
 #define MAVLINK_RX_CHAN MAVLINK_COMM_1
 
-static const uint8_t MAV_SYSTEM_ID = 1;
-static const uint8_t MAV_COMPONENT_ID = MAV_COMP_ID_AUTOPILOT1;
-static const uint8_t MAV_DRONE_TYPE = MAV_TYPE_QUADROTOR;
-static const uint8_t MAV_AUTOPILOT_TYPE = MAV_AUTOPILOT_GENERIC;
+static constexpr uint8_t MAV_SYSTEM_ID = 1;
+static constexpr uint8_t MAV_COMPONENT_ID = MAV_COMP_ID_AUTOPILOT1;
+static constexpr uint8_t MAV_DRONE_TYPE = MAV_TYPE_QUADROTOR;
+static constexpr uint8_t MAV_AUTOPILOT_TYPE = MAV_AUTOPILOT_GENERIC;
 
 static int udp_socket;
 static struct sockaddr_in local_addr;
@@ -114,7 +114,7 @@ static bool mav_pack_status_text(mavlink_message_t *msg, const char *text) {
   return true;
 }
 
-static void send_param_value(const params_entry_t *p, uint16_t idx) {
+static void send_param_value(const params_entry_t *p, const uint16_t idx) {
   mavlink_message_t msg;
   mav_lock();
   mavlink_msg_param_value_pack_chan(
@@ -132,7 +132,7 @@ static void send_param_value(const params_entry_t *p, uint16_t idx) {
 }
 
 static bool handle_param_request_list(const mavlink_message_t *msg) {
-  for (uint16_t i = 0; i < PARAMS_COUNT; i++) {
+  for (size_t i = 0; i < PARAMS_COUNT; i++) {
     send_param_value(&params_list[i], i);
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -144,13 +144,13 @@ static bool handle_param_request_read(const mavlink_message_t *msg) {
   mavlink_msg_param_request_read_decode(msg, &decoded);
   params_entry_t param;
   if (param_get(decoded.param_id, &param) != true) {
-    mavlink_message_t msg;
+    mavlink_message_t resp;
     char buf[50];
     snprintf(buf, sizeof(buf), "Unknown parameter: \'%s\'", decoded.param_id);
-    mav_pack_status_text(&msg, buf);
+    mav_pack_status_text(&resp, buf);
     mav_lock();
-    mav_send(&msg);
-    mav_lock();
+    mav_send(&resp);
+    mav_unlock();
     return false;
   }
   send_param_value(&param, decoded.param_index);
@@ -215,6 +215,7 @@ static void tx_task(void *pvParameters) {
       tx_handler_t handler = tx_handler_table[i];
       if (now_ms - handler.last_sent_ms < handler.interval_ms)
         continue;
+      handler.last_sent_ms = now_ms;
       if (handler.handler_fn(&msg) != true) {
         ESP_LOGW(TAG, "Failed to send tx message");
       };
@@ -241,9 +242,9 @@ static void rx_task(void *pvParameters) {
     }
     for (int i = 0; i < n; i++) {
       if (mavlink_parse_char(MAVLINK_RX_CHAN, rx_buf[i], &msg, &status)) {
-        for (size_t i = 0; i < RX_HANDLER_COUNT; i++) {
-          if (rx_handler_table[i].mav_msg_id == msg.msgid) {
-            if (rx_handler_table[i].handler_fn(&msg) != true) {
+        for (size_t j = 0; j < RX_HANDLER_COUNT; j++) {
+          if (rx_handler_table[j].mav_msg_id == msg.msgid) {
+            if (rx_handler_table[j].handler_fn(&msg) != true) {
               ESP_LOGW(TAG, "RX handler error on %d", msg.msgid);
             };
             break;
@@ -256,15 +257,15 @@ static void rx_task(void *pvParameters) {
 
 TaskHandle_t communications_start() {
   mav_mutex = xSemaphoreCreateMutex();
-  if (mav_mutex == NULL) {
+  if (mav_mutex == nullptr) {
     ESP_LOGE(TAG, "Failed to create mavlink mutex");
-    return NULL;
+    return nullptr;
   }
 
   udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (udp_socket < 0) {
     ESP_LOGE(TAG, "UDP socket error");
-    return NULL;
+    return nullptr;
   }
 
   local_addr.sin_family = AF_INET;
@@ -273,24 +274,24 @@ TaskHandle_t communications_start() {
 
   if (bind(udp_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) != 0) {
     ESP_LOGE(TAG, "UDP bind error: errno %d", errno);
-    return NULL;
+    return nullptr;
   }
 
   dest_addr.sin_addr.s_addr = inet_addr(CFG_HOST_ADDR);
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons(CFG_HOST_PORT);
 
-  BaseType_t ret = xTaskCreatePinnedToCore(tx_task, "mavlink_tx", 3072, NULL, 20, &tx_task_handle, 0);
+  BaseType_t ret = xTaskCreatePinnedToCore(tx_task, "mavlink_tx", 3072, nullptr, 20, &tx_task_handle, 0);
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "Failed to create TX task");
-    return NULL;
+    return nullptr;
   }
 
-  ret = xTaskCreatePinnedToCore(rx_task, "mavlink_rx", 4096, NULL, 18, &rx_task_handle, 0);
+  ret = xTaskCreatePinnedToCore(rx_task, "mavlink_rx", 4096, nullptr, 18, &rx_task_handle, 0);
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "Failed to create RX task");
     vTaskDelete(tx_task_handle);
-    return NULL;
+    return nullptr;
   }
 
   return tx_task_handle;

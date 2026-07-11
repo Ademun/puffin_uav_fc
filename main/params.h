@@ -1,5 +1,4 @@
-#ifndef PARAMS_H
-#define PARAMS_H
+#pragma once
 
 #include <stddef.h>
 
@@ -37,5 +36,3 @@ bool param_set(const char* name, float value, params_entry_t* p,
                uint16_t* id);
 
 bool param_get(const char* name, params_entry_t* p);
-
-#endif

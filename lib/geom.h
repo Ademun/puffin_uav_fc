@@ -34,4 +34,6 @@ void v_mult(vec3_t* v, float n);
 
 float invSqrt(float x);
 
+float clamp(float n, float min, float max);
+
 #endif

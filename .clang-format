@@ -2,5 +2,4 @@ BasedOnStyle: LLVM
 BinPackParameters: false
 BinPackArguments: false   
 ColumnLimit: 120      
-AlignAfterOpenBracket: AlwaysBreak
-BreakBeforeClosingParen: Always
+AlignAfterOpenBracket: true

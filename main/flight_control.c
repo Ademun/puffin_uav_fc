@@ -11,15 +11,15 @@
 #include "telemetry.h"
 #include "params.h"
 
-static TaskHandle_t s_flight_control_task_handle = NULL;
-static esp_timer_handle_t s_flight_control_task_timer = NULL;
+static TaskHandle_t s_flight_control_task_handle = nullptr;
+static esp_timer_handle_t s_flight_control_task_timer = nullptr;
 
 static void flight_control_task_timer_callback(void* arg) {
   xTaskNotifyGive(s_flight_control_task_handle);
 }
 
 static esp_err_t flight_control_task_timer_init(void) {
-  const esp_timer_create_args_t timer_args = {
+  esp_timer_create_args_t timer_args = {
       .callback = &flight_control_task_timer_callback,
       .name = "1kHz_timer",
   };
@@ -51,12 +51,14 @@ static void get_correction_speed(quat_t* orientation,
     orient_err_angle = 2.0f;
   }
 
-  v_mult(&angular_vel, orient_err_angle * params_config.pitch_gain_kp);
+  angular_vel.x = clamp( angular_vel.x * orient_err_angle * params_config.pitch_gain_kp, -params_config.pitch_angular_lim, params_config.pitch_angular_lim);
+  angular_vel.y = clamp( angular_vel.y * orient_err_angle * params_config.roll_gain_kp, -params_config.roll_angular_lim, params_config.roll_angular_lim);
+  angular_vel.z = clamp( angular_vel.z * orient_err_angle * params_config.yaw_gain_kp, -params_config.yaw_angular_lim, params_config.yaw_angular_lim);
   *out_correction_speed = angular_vel;
 }
 
 static void flight_control_task(void* pvParameters) {
-  i2c_master_dev_handle_t imu_handle = (i2c_master_dev_handle_t)pvParameters;
+  i2c_master_dev_handle_t imu_handle = pvParameters;
   uint8_t loop_count = 0;
   imu_data_t imu_data;
   telemetry_data_t telemetry_data;
