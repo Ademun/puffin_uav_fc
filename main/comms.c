@@ -7,6 +7,8 @@
 #include "lwip/sys.h"
 #include "params.h"
 #include "telemetry.h"
+#include "status.h"
+#include <stdio.h>
 
 static const char *TAG = "COMMS";
 #define MAVLINK_TX_CHAN MAVLINK_COMM_0
@@ -51,22 +53,34 @@ typedef struct {
 } rx_handler_t;
 
 static bool mav_pack_heartbeat(mavlink_message_t *msg) {
+  uint32_t mode = 0;
+  uint32_t state = 0;
+  if (arm_is_ready_to_arm()) {
+    mode |= MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_MANUAL_INPUT_ENABLED;
+    state |= MAV_STATE_STANDBY;
+  } else if (arm_is_armed()) {
+    mode |= MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_MANUAL_INPUT_ENABLED | MAV_MODE_STABILIZE_ARMED;
+    state |= MAV_STATE_ACTIVE;
+  } else {
+    state |= MAV_STATE_BOOT;
+  }
+  printf("%d/%d\r", arm_is_ready_to_arm(), arm_is_armed());
   mavlink_msg_heartbeat_pack(
       MAV_SYSTEM_ID,
       MAV_COMPONENT_ID,
       msg,
       MAV_DRONE_TYPE,
       MAV_AUTOPILOT_TYPE,
-      MAV_MODE_FLAG_MANUAL_INPUT_ENABLED,
+      mode,
       0,
-      MAV_STATE_STANDBY);
+      state);
   return true;
 };
 
 static bool mav_pack_attitude(mavlink_message_t *msg) {
   telemetry_data_t data;
   if (xQueuePeek(telemetry_queue, &data, 0) != pdTRUE)
-    return false;
+    return true;
   mavlink_msg_attitude_pack(
       MAV_SYSTEM_ID,
       MAV_COMPONENT_ID,
@@ -83,9 +97,9 @@ static bool mav_pack_attitude(mavlink_message_t *msg) {
 
 static bool mav_pack_sys_status(mavlink_message_t *msg) {
 
-  uint32_t sensors_present = MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
-  uint32_t sensors_enabled = MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
-  uint32_t sensors_health = MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL;
+  uint32_t sensors_present = STATUS_SENSOR_REQUIRED_MASK;
+  uint32_t sensors_enabled = STATUS_SENSOR_REQUIRED_MASK;
+  uint32_t sensors_health = status_sensor_health();
   mavlink_msg_sys_status_pack(
       MAV_SYSTEM_ID,
       MAV_COMPONENT_ID,
@@ -132,7 +146,7 @@ static void send_param_value(const params_entry_t *p, const uint16_t idx) {
 }
 
 static bool handle_param_request_list(const mavlink_message_t *msg) {
-  for (size_t i = 0; i < PARAMS_COUNT; i++) {
+  for (uint16_t i = 0; i < PARAMS_COUNT; i++) {
     send_param_value(&params_list[i], i);
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -217,7 +231,7 @@ static void tx_task(void *pvParameters) {
         continue;
       handler.last_sent_ms = now_ms;
       if (handler.handler_fn(&msg) != true) {
-        ESP_LOGW(TAG, "Failed to send tx message");
+        ESP_LOGW(TAG, "Failed to send tx message, handler: %d", i);
       };
       mav_lock();
       mav_send(&msg);

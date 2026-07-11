@@ -10,6 +10,7 @@
 #include "math.h"
 #include "telemetry.h"
 #include "params.h"
+#include "status.h"
 
 static TaskHandle_t s_flight_control_task_handle = nullptr;
 static esp_timer_handle_t s_flight_control_task_timer = nullptr;
@@ -67,6 +68,10 @@ static void flight_control_task(void* pvParameters) {
   vec3_t angular_vel_cmd;
 
   while (1) {
+    if (!arm_is_armed()) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
     if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) continue;
 
     loop_count++;
