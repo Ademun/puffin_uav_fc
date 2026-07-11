@@ -6,8 +6,8 @@
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include "params.h"
-#include "telemetry.h"
 #include "status.h"
+#include "telemetry.h"
 #include <stdio.h>
 
 static const char *TAG = "COMMS";
@@ -40,6 +40,7 @@ static TaskHandle_t rx_task_handle;
 
 typedef bool (*tx_handler_fn)(mavlink_message_t *msg);
 typedef bool (*rx_handler_fn)(const mavlink_message_t *msg);
+typedef bool (*rx_command_handler_fn)(const mavlink_command_long_t *cmd);
 
 typedef struct {
   uint16_t interval_ms;
@@ -52,46 +53,41 @@ typedef struct {
   rx_handler_fn handler_fn;
 } rx_handler_t;
 
+typedef struct {
+  uint16_t mav_cmd_id;
+  rx_command_handler_fn handler_fn;
+} rx_command_handler_t;
+
 static bool mav_pack_heartbeat(mavlink_message_t *msg) {
   uint32_t mode = 0;
   uint32_t state = 0;
-  if (arm_is_ready_to_arm()) {
-    mode |= MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_MANUAL_INPUT_ENABLED;
-    state |= MAV_STATE_STANDBY;
-  } else if (arm_is_armed()) {
-    mode |= MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_MANUAL_INPUT_ENABLED | MAV_MODE_STABILIZE_ARMED;
-    state |= MAV_STATE_ACTIVE;
+  if (arm_is_armed()) {
+    mode = MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_MANUAL_INPUT_ENABLED | MAV_MODE_STABILIZE_ARMED;
+    state = MAV_STATE_ACTIVE;
+  } else if (arm_is_ready_to_arm()) {
+    mode = MAV_MODE_FLAG_STABILIZE_ENABLED | MAV_MODE_FLAG_MANUAL_INPUT_ENABLED;
+    state = MAV_STATE_STANDBY;
   } else {
-    state |= MAV_STATE_BOOT;
+    state = MAV_STATE_BOOT;
   }
-  printf("%d/%d\r", arm_is_ready_to_arm(), arm_is_armed());
-  mavlink_msg_heartbeat_pack(
-      MAV_SYSTEM_ID,
-      MAV_COMPONENT_ID,
-      msg,
-      MAV_DRONE_TYPE,
-      MAV_AUTOPILOT_TYPE,
-      mode,
-      0,
-      state);
+  mavlink_msg_heartbeat_pack(MAV_SYSTEM_ID, MAV_COMPONENT_ID, msg, MAV_DRONE_TYPE, MAV_AUTOPILOT_TYPE, mode, 0, state);
   return true;
 };
 
 static bool mav_pack_attitude(mavlink_message_t *msg) {
   telemetry_data_t data;
   if (xQueuePeek(telemetry_queue, &data, 0) != pdTRUE)
-    return true;
-  mavlink_msg_attitude_pack(
-      MAV_SYSTEM_ID,
-      MAV_COMPONENT_ID,
-      msg,
-      data.timestamp_ms,
-      data.roll,
-      data.pitch,
-      data.yaw,
-      data.vroll,
-      data.vpitch,
-      data.vyaw);
+    return false;
+  mavlink_msg_attitude_pack(MAV_SYSTEM_ID,
+                            MAV_COMPONENT_ID,
+                            msg,
+                            data.timestamp_ms,
+                            data.roll,
+                            data.pitch,
+                            data.yaw,
+                            data.vroll,
+                            data.vpitch,
+                            data.vyaw);
   return true;
 }
 
@@ -100,26 +96,25 @@ static bool mav_pack_sys_status(mavlink_message_t *msg) {
   uint32_t sensors_present = STATUS_SENSOR_REQUIRED_MASK;
   uint32_t sensors_enabled = STATUS_SENSOR_REQUIRED_MASK;
   uint32_t sensors_health = status_sensor_health();
-  mavlink_msg_sys_status_pack(
-      MAV_SYSTEM_ID,
-      MAV_COMPONENT_ID,
-      msg,
-      sensors_present,
-      sensors_enabled,
-      sensors_health,
-      0,
-      12000,
-      -1,
-      -1,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0);
+  mavlink_msg_sys_status_pack(MAV_SYSTEM_ID,
+                              MAV_COMPONENT_ID,
+                              msg,
+                              sensors_present,
+                              sensors_enabled,
+                              sensors_health,
+                              0,
+                              12000,
+                              -1,
+                              -1,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0);
   return true;
 }
 
@@ -131,16 +126,15 @@ static bool mav_pack_status_text(mavlink_message_t *msg, const char *text) {
 static void send_param_value(const params_entry_t *p, const uint16_t idx) {
   mavlink_message_t msg;
   mav_lock();
-  mavlink_msg_param_value_pack_chan(
-      MAV_SYSTEM_ID,
-      MAV_COMPONENT_ID,
-      MAVLINK_RX_CHAN,
-      &msg,
-      p->name,
-      *(p->value_p),
-      MAV_PARAM_TYPE_REAL32,
-      PARAMS_COUNT,
-      idx);
+  mavlink_msg_param_value_pack_chan(MAV_SYSTEM_ID,
+                                    MAV_COMPONENT_ID,
+                                    MAVLINK_RX_CHAN,
+                                    &msg,
+                                    p->name,
+                                    *(p->value_p),
+                                    MAV_PARAM_TYPE_REAL32,
+                                    PARAMS_COUNT,
+                                    idx);
   mav_send(&msg);
   mav_unlock();
 }
@@ -171,6 +165,14 @@ static bool handle_param_request_read(const mavlink_message_t *msg) {
   return true;
 }
 
+static void send_command_ack(const uint16_t cmd_id, const uint8_t result, const uint8_t percentage) {
+  mavlink_message_t msg;
+  mav_lock();
+  mavlink_msg_command_ack_pack_chan(MAV_SYSTEM_ID, MAV_COMPONENT_ID, MAVLINK_RX_CHAN,  &msg, cmd_id, result, percentage, 0, 0, 0);
+  mav_send(&msg);
+  mav_unlock();
+}
+
 static bool handle_param_set(const mavlink_message_t *msg) {
   mavlink_param_set_t decoded;
   mavlink_msg_param_set_decode(msg, &decoded);
@@ -179,6 +181,19 @@ static bool handle_param_set(const mavlink_message_t *msg) {
   bool result = param_set(decoded.param_id, decoded.param_value, &param, &idx);
   if (idx != UINT16_MAX) {
     send_param_value(&param, idx);
+  }
+  return result;
+}
+
+static bool handle_command_long(const mavlink_message_t *msg);
+
+static bool handle_cmd_component_arm_disarm(const mavlink_command_long_t *cmd) {
+  // ignore force arming for now
+  bool result = arm_toggle_armed(cmd->param1 == 1);
+  if (result) {
+    send_command_ack(cmd->command, MAV_RESULT_ACCEPTED, 0);
+  } else {
+    send_command_ack(cmd->command, MAV_RESULT_DENIED, 0);
   }
   return result;
 }
@@ -216,9 +231,33 @@ static rx_handler_t rx_handler_table[] = {
         .mav_msg_id = MAVLINK_MSG_ID_PARAM_SET,
         .handler_fn = handle_param_set,
     },
+    {
+        .mav_msg_id = MAVLINK_MSG_ID_COMMAND_LONG,
+        .handler_fn = handle_command_long,
+    },
 };
 
 #define RX_HANDLER_COUNT sizeof(rx_handler_table) / sizeof(rx_handler_t)
+
+static rx_command_handler_t rx_command_handler_table[] = {
+    {
+        .mav_cmd_id = MAV_CMD_COMPONENT_ARM_DISARM,
+        .handler_fn = handle_cmd_component_arm_disarm,
+    },
+};
+
+#define RX_COMMAND_HANDLER_COUNT sizeof(rx_command_handler_table) / sizeof(rx_command_handler_t)
+
+static bool handle_command_long(const mavlink_message_t *msg) {
+  mavlink_command_long_t decoded;
+  mavlink_msg_command_long_decode(msg, &decoded);
+  for (size_t i = 0; i < RX_COMMAND_HANDLER_COUNT; i++) {
+    if (rx_command_handler_table[i].mav_cmd_id == decoded.command) {
+      return rx_command_handler_table[i].handler_fn(&decoded);
+    }
+  }
+  return false;
+}
 
 static void tx_task(void *pvParameters) {
   uint32_t now_ms;
@@ -226,11 +265,11 @@ static void tx_task(void *pvParameters) {
   while (1) {
     now_ms = pdTICKS_TO_MS(xTaskGetTickCount());
     for (size_t i = 0; i < TX_HANDLER_COUNT; i++) {
-      tx_handler_t handler = tx_handler_table[i];
-      if (now_ms - handler.last_sent_ms < handler.interval_ms)
+      tx_handler_t *handler = &tx_handler_table[i];
+      if (now_ms - handler->last_sent_ms < handler->interval_ms)
         continue;
-      handler.last_sent_ms = now_ms;
-      if (handler.handler_fn(&msg) != true) {
+      handler->last_sent_ms = now_ms;
+      if (handler->handler_fn(&msg) != true) {
         ESP_LOGW(TAG, "Failed to send tx message, handler: %d", i);
       };
       mav_lock();

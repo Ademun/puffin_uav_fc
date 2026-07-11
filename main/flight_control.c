@@ -8,16 +8,14 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "math.h"
-#include "telemetry.h"
 #include "params.h"
 #include "status.h"
+#include "telemetry.h"
 
 static TaskHandle_t s_flight_control_task_handle = nullptr;
 static esp_timer_handle_t s_flight_control_task_timer = nullptr;
 
-static void flight_control_task_timer_callback(void* arg) {
-  xTaskNotifyGive(s_flight_control_task_handle);
-}
+static void flight_control_task_timer_callback(void *arg) { xTaskNotifyGive(s_flight_control_task_handle); }
 
 static esp_err_t flight_control_task_timer_init(void) {
   esp_timer_create_args_t timer_args = {
@@ -25,12 +23,12 @@ static esp_err_t flight_control_task_timer_init(void) {
       .name = "1kHz_timer",
   };
   esp_err_t ret = esp_timer_create(&timer_args, &s_flight_control_task_timer);
-  if (ret != ESP_OK) return ret;
+  if (ret != ESP_OK)
+    return ret;
   return esp_timer_start_periodic(s_flight_control_task_timer, 1000);
 }
 
-static void get_correction_speed(quat_t* orientation,
-                                 vec3_t* out_correction_speed) {
+static void get_correction_speed(quat_t *orientation, vec3_t *out_correction_speed) {
   quat_t desired_rotation = {.w = 1.0f, .x = 0.0f, .y = 0.0f, .z = 0.0f};
   quat_t orient_conj, orient_err;
   vec3_t angular_vel;
@@ -46,19 +44,24 @@ static void get_correction_speed(quat_t* orientation,
   q_vec(&orient_err, &angular_vel);
   angular_vel_norm = v_norm(&angular_vel);
   if (angular_vel_norm > 1e-6f) {
-    orient_err_angle =
-        2.0f * atan2f(angular_vel_norm, orient_err.w) / angular_vel_norm;
+    orient_err_angle = 2.0f * atan2f(angular_vel_norm, orient_err.w) / angular_vel_norm;
   } else {
     orient_err_angle = 2.0f;
   }
 
-  angular_vel.x = clamp( angular_vel.x * orient_err_angle * params_config.pitch_gain_kp, -params_config.pitch_angular_lim, params_config.pitch_angular_lim);
-  angular_vel.y = clamp( angular_vel.y * orient_err_angle * params_config.roll_gain_kp, -params_config.roll_angular_lim, params_config.roll_angular_lim);
-  angular_vel.z = clamp( angular_vel.z * orient_err_angle * params_config.yaw_gain_kp, -params_config.yaw_angular_lim, params_config.yaw_angular_lim);
+  angular_vel.x = clamp(angular_vel.x * orient_err_angle * params_config.pitch_gain_kp,
+                        -params_config.pitch_angular_lim,
+                        params_config.pitch_angular_lim);
+  angular_vel.y = clamp(angular_vel.y * orient_err_angle * params_config.roll_gain_kp,
+                        -params_config.roll_angular_lim,
+                        params_config.roll_angular_lim);
+  angular_vel.z = clamp(angular_vel.z * orient_err_angle * params_config.yaw_gain_kp,
+                        -params_config.yaw_angular_lim,
+                        params_config.yaw_angular_lim);
   *out_correction_speed = angular_vel;
 }
 
-static void flight_control_task(void* pvParameters) {
+static void flight_control_task(void *pvParameters) {
   i2c_master_dev_handle_t imu_handle = pvParameters;
   uint8_t loop_count = 0;
   imu_data_t imu_data;
@@ -72,7 +75,8 @@ static void flight_control_task(void* pvParameters) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
-    if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) continue;
+    if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0)
+      continue;
 
     loop_count++;
 
@@ -83,8 +87,7 @@ static void flight_control_task(void* pvParameters) {
     }
 
     if ((loop_count % CFG_ATTITUDE_LOOP_DIVIDER) == 0) {
-      update_mahony_imu(imu_data.ax, imu_data.ay, imu_data.az, imu_data.gx,
-                        imu_data.gy, imu_data.gz);
+      update_mahony_imu(imu_data.ax, imu_data.ay, imu_data.az, imu_data.gx, imu_data.gy, imu_data.gz);
       get_orientation_quat(&orientation);
       get_correction_speed(&orientation, &angular_vel_cmd);
     }
@@ -107,8 +110,7 @@ static void flight_control_task(void* pvParameters) {
 
 TaskHandle_t flight_control_start(i2c_master_dev_handle_t imu_handle) {
   BaseType_t ret = xTaskCreatePinnedToCore(
-      flight_control_task, "flight_control", 2048, (void*)imu_handle, 20,
-      &s_flight_control_task_handle, 1);
+      flight_control_task, "flight_control", 2048, (void *)imu_handle, 20, &s_flight_control_task_handle, 1);
   if (ret != pdPASS) {
     ESP_LOGE(CFG_LOG_TAG, "Failed to create flight control task");
     return NULL;
