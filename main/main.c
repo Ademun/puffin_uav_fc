@@ -6,12 +6,19 @@
 #include "esp_log.h"
 #include "flight_control.h"
 #include "imu.h"
-#include "wifi.h"
-#include "telemetry.h"
 #include "params.h"
+#include "signal.h"
 #include "status.h"
+#include "telemetry.h"
+#include "wifi.h"
 
 void app_main(void) {
+  TaskHandle_t signal_handle = signal_init();
+  if (signal_handle == nullptr) {
+    ESP_LOGE(CFG_LOG_TAG, "Failed to start signal");
+    return;
+  }
+  signal_play(SIGNAL_BOOT);
   wifi_init();
   telemetry_init();
   params_init();
@@ -36,9 +43,12 @@ void app_main(void) {
   ESP_LOGI(CFG_LOG_TAG, "IMU device configured");
 
   ESP_LOGI(CFG_LOG_TAG, "IMU calibration, please wait");
+  signal_play(SIGNAL_CALIBRATION_START);
   ESP_ERROR_CHECK(calibrate_imu(imu_handle));
   ESP_LOGI(CFG_LOG_TAG, "IMU calibration finished");
-  status_sensor_set_healthy(MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL | MAV_SYS_STATUS_SENSOR_BATTERY);
+  signal_play(SIGNAL_CALIBRATION_END);
+  status_sensor_set_healthy(MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL |
+                            MAV_SYS_STATUS_SENSOR_BATTERY);
 
   init_mahony_filter(CFG_ATTITUDE_LOOP_HZ);
 

@@ -68,9 +68,9 @@ static void get_correction_speed(quat_t *orientation, vec3_t *out_correction_spe
 }
 
 static void get_correction_torque(const imu_data_t *imu_data, const vec3_t *angular_speed, vec3_t *torque) {
-  float pitch_err = imu_data->gx * G_DEG_TO_RAD - angular_speed->x;
-  float roll_err = imu_data->gy * G_DEG_TO_RAD - angular_speed->y;
-  float yaw_err = imu_data->gz * G_DEG_TO_RAD - angular_speed->z;
+  float pitch_err = imu_data->gx - angular_speed->x * G_RAD_TO_DEG;
+  float roll_err = imu_data->gy - angular_speed->y * G_RAD_TO_DEG;
+  float yaw_err = imu_data->gz - angular_speed->z * G_RAD_TO_DEG;
 
   float torque_pitch = pid_update(&pitch_pid, 0, pitch_err, 0.001f);
   float torque_roll = pid_update(&roll_pid, 0, roll_err, 0.001f);
@@ -86,10 +86,71 @@ static void motor_mixer(const vec3_t *torque, const float thrust) {
   float m2 = thrust - torque->x + torque->y + torque->z;
   float m3 = thrust + torque->x + torque->y - torque->z;
   float m4 = thrust - torque->x - torque->y - torque->z;
-  printf("\033[2A");
-  printf("\033[K%6.1f %6.1f\n", m3, m1);
-  printf("\033[K%6.1f %6.1f\r", m2, m4);
-  fflush(stdout);
+
+  float m1_diff = m1 - thrust;
+  float m2_diff = m2 - thrust;
+  float m3_diff = m3 - thrust;
+  float m4_diff = m4 - thrust;
+
+  float t_min = 0.0f - fmin(fmin(m1_diff, m2_diff), fmin(m3_diff, m4_diff));
+  float t_max = 1.0f - fmax(fmax(m1_diff, m2_diff), fmax(m3_diff, m4_diff));
+
+  if (t_min <= t_max) {
+    float thrust_sat = fmax(fmin(thrust, t_max), t_min);
+    m1 = m1_diff + thrust_sat;
+    m2 = m2_diff + thrust_sat;
+    m3 = m3_diff + thrust_sat;
+    m4 = m4_diff + thrust_sat;
+  } else {
+    float max_diff = fmax(fmax(m1_diff, m2_diff), fmax(m3_diff, m4_diff));
+    float min_diff = fmin(fmin(m1_diff, m2_diff), fmin(m3_diff, m4_diff));
+    float k1 = 1.0f;
+    float k2 = 1.0f;
+    if (max_diff > 0) {
+      k1 = (1.0f - thrust) / max_diff;
+    }
+    if (min_diff < 0) {
+      k2 = thrust / max_diff;
+    }
+    float k = fmin(fmin(k1, k2), 1.0);
+    m1 = k * m1_diff + thrust;
+    m2 = k * m2_diff + thrust;
+    m3 = k * m3_diff + thrust;
+    m4 = k * m4_diff + thrust;
+  }
+
+  m1 = clamp(m1, 0.0f, 1.0f);
+  m2 = clamp(m2, 0.0f, 1.0f);
+  m3 = clamp(m3, 0.0f, 1.0f);
+  m4 = clamp(m4, 0.0f, 1.0f);
+
+  static bool first_call = true;
+  if (!first_call) {
+    // Move up ONE line and to the beginning of that line
+    printf("\033[1A\r");
+  }
+  first_call = false;
+
+  // Row 1 with a newline
+  printf("m3: %8.2f%%  m1: %8.2f%%\n", m3 * 100, m1 * 100);
+  // Row 2 without newline (cursor stays at its end)
+  printf("m2: %8.2f%%  m4: %8.2f%%", m2 * 100, m4 * 100);
+
+  fflush(stdout); // critical for immediate display
+}
+
+static void update_pid(void) {
+  pitch_pid.kp = params_config.pitch_rate_kp / 1000;
+  pitch_pid.ki = params_config.pitch_rate_ki / 1000;
+  pitch_pid.kd = params_config.pitch_rate_kd / 1000;
+
+  roll_pid.kp = params_config.roll_rate_kp / 1000;
+  roll_pid.ki = params_config.roll_rate_ki / 1000;
+  roll_pid.kd = params_config.roll_rate_kd / 1000;
+
+  yaw_pid.kp = params_config.yaw_rate_kp / 1000;
+  yaw_pid.ki = params_config.yaw_rate_ki / 1000;
+  yaw_pid.kd = params_config.yaw_rate_kd / 1000;
 }
 
 static void flight_control_task(void *pvParameters) {
@@ -110,6 +171,8 @@ static void flight_control_task(void *pvParameters) {
     if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0)
       continue;
 
+    update_pid();
+
     loop_count++;
 
     esp_err_t err = read_imu_data(imu_handle, &imu_data);
@@ -126,7 +189,7 @@ static void flight_control_task(void *pvParameters) {
     }
 
     get_correction_torque(&imu_data, &angular_vel_cmd, &torque_cmd);
-    motor_mixer(&torque_cmd, 100.0f);
+    motor_mixer(&torque_cmd, params_config.thrust / 100);
 
     if ((loop_count % CFG_TELEMETRY_LOOP_DIVIDER) == 0) {
       q_euler(&orientation, &orientation_euler);
@@ -145,9 +208,16 @@ static void flight_control_task(void *pvParameters) {
 }
 
 TaskHandle_t flight_control_start(i2c_master_dev_handle_t imu_handle) {
-  pid_init(&pitch_pid, 5.0f, 0.5f, 2.0f, 2.0f, -2.0f);
-  pid_init(&roll_pid, 5.0f, 0.5f, 2.0f, 2.0f, -2.0f);
-  pid_init(&yaw_pid, 5.0f, 0.5f, 2.0f, 2.0f, -2.0f);
+  pid_init(&pitch_pid,
+           params_config.pitch_rate_kp / 1000,
+           params_config.pitch_rate_ki / 1000,
+           params_config.pitch_rate_kd / 1000);
+  pid_init(&roll_pid,
+           params_config.roll_rate_kp / 1000,
+           params_config.roll_rate_ki / 1000,
+           params_config.roll_rate_kd / 1000);
+  pid_init(
+      &yaw_pid, params_config.yaw_rate_kp / 1000, params_config.yaw_rate_ki / 1000, params_config.yaw_rate_kd / 1000);
   BaseType_t ret = xTaskCreatePinnedToCore(
       flight_control_task, "flight_control", 2048, (void *)imu_handle, 20, &s_flight_control_task_handle, 1);
   if (ret != pdPASS) {

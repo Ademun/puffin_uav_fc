@@ -19,7 +19,16 @@ const params_entry_t params_list[] = {
     PARAM_ENTRY("YAW_G_P", yaw_gain_kp, 1.0f, 0.1f, 10.0f),
     PARAM_ENTRY("ROLL_ANG_L", roll_angular_lim, 0.35f, 0.1f, 0.8f),
     PARAM_ENTRY("PITCH_ANG_L", pitch_angular_lim, 0.35f, 0.1f, 0.8f),
-    PARAM_ENTRY("YAW_ANG_L", yaw_angular_lim, 0.35f, 0.1f, 0.8f),
+    PARAM_ENTRY("PITCH_RATE_P", pitch_rate_kp, 20.0f, 1.0f, 50.0f),
+    PARAM_ENTRY("PITCH_RATE_I", pitch_rate_ki, 10.0f, 1.0f, 20.0f),
+    PARAM_ENTRY("PITCH_RATE_D", pitch_rate_kd, 0.1f, 0.01f, 5.0f),
+    PARAM_ENTRY("ROLL_RATE_P", roll_rate_kp, 20.0f, 1.0f, 50.0f),
+    PARAM_ENTRY("ROLL_RATE_I", roll_rate_ki, 10.0f, 1.0f, 20.0f),
+    PARAM_ENTRY("ROLL_RATE_D", roll_rate_kd, 0.1f, 0.1f, 5.0f),
+    PARAM_ENTRY("YAW_RATE_P", yaw_rate_kp, 20.0f, 1.0f, 50.0f),
+    PARAM_ENTRY("YAW_RATE_I", yaw_rate_ki, 10.0f, 1.0f, 20.0f),
+    PARAM_ENTRY("YAW_RATE_D", yaw_rate_kd, 0.1f, 0.1f, 5.0f),
+    PARAM_ENTRY("THRUST", thrust, 0.0f, 0.0f, 100.0f),
 };
 
 const size_t PARAMS_COUNT = sizeof(params_list) / sizeof(params_entry_t);
@@ -73,6 +82,7 @@ esp_err_t params_init(void) {
   err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to open NVS");
+    return err;
   }
 
   err = load_from_nvs(handle);
@@ -89,36 +99,36 @@ esp_err_t params_init(void) {
   return ESP_OK;
 }
 
-  bool param_set(const char *name, float value, params_entry_t *p, uint16_t *id) {
-    for (size_t i = 0; i < PARAMS_COUNT; i++) {
-      if (strncmp(params_list[i].name, name, PARAM_NAME_LEN) == 0) {
-        if (value < params_list[i].min_value || value > params_list[i].max_value) {
-          memcpy(p, &params_list[i], sizeof(params_entry_t));
-          *id = i;
-          return false;
-        }
-        nvs_handle_t handle;
-        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
-        if (err != ESP_OK) {
-          memcpy(p, &params_list[i], sizeof(params_entry_t));
-          *id = i;
-          return false;
-        }
-
-        uint32_t buf = 0;
-        memcpy(&buf, &value, sizeof(float));
-        nvs_set_u32(handle, params_list[i].name, buf);
-        nvs_commit(handle);
-        nvs_close(handle);
-
-        *params_list[i].value_p = value;
+bool param_set(const char *name, float value, params_entry_t *p, uint16_t *id) {
+  for (size_t i = 0; i < PARAMS_COUNT; i++) {
+    if (strncmp(params_list[i].name, name, PARAM_NAME_LEN) == 0) {
+      if (value < params_list[i].min_value || value > params_list[i].max_value) {
         memcpy(p, &params_list[i], sizeof(params_entry_t));
         *id = i;
-        return true;
+        return false;
       }
+      nvs_handle_t handle;
+      esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+      if (err != ESP_OK) {
+        memcpy(p, &params_list[i], sizeof(params_entry_t));
+        *id = i;
+        return false;
+      }
+
+      uint32_t buf = 0;
+      memcpy(&buf, &value, sizeof(float));
+      nvs_set_u32(handle, params_list[i].name, buf);
+      nvs_commit(handle);
+      nvs_close(handle);
+
+      *params_list[i].value_p = value;
+      memcpy(p, &params_list[i], sizeof(params_entry_t));
+      *id = i;
+      return true;
     }
-    return false;
   }
+  return false;
+}
 
 bool param_get(const char *name, params_entry_t *p) {
   for (size_t i = 0; i < PARAMS_COUNT; i++) {

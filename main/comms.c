@@ -6,6 +6,7 @@
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include "params.h"
+#include "signal.h"
 #include "status.h"
 #include "telemetry.h"
 #include <stdio.h>
@@ -124,9 +125,7 @@ static bool mav_pack_status_text(mavlink_message_t *msg, const char *text) {
   return true;
 }
 
-static void handle_heartbeat(const mavlink_message_t *msg) {
-
-}
+static void handle_heartbeat(const mavlink_message_t *msg) {}
 
 static void send_param_value(const params_entry_t *p, const uint16_t idx) {
   mavlink_message_t msg;
@@ -198,6 +197,7 @@ static bool handle_cmd_component_arm_disarm(const mavlink_command_long_t *cmd) {
   bool result = arm_toggle_armed(cmd->param1 == 1);
   if (result) {
     send_command_ack(cmd->command, MAV_RESULT_ACCEPTED, 0);
+    signal_play(cmd->param1 == 1 ? SIGNAL_ARMED : SIGNAL_DISARMED);
   } else {
     send_command_ack(cmd->command, MAV_RESULT_DENIED, 0);
   }

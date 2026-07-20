@@ -14,11 +14,25 @@ typedef struct {
   float roll_angular_lim;
   float pitch_angular_lim;
   float yaw_angular_lim;
+  //===
+  float pitch_rate_kp;
+  float pitch_rate_ki;
+  float pitch_rate_kd;
+
+  float roll_rate_kp;
+  float roll_rate_ki;
+  float roll_rate_kd;
+
+  float yaw_rate_kp;
+  float yaw_rate_ki;
+  float yaw_rate_kd;
+  //===
+  float thrust;
 } params_config_t;
 
 typedef struct {
   const char name[PARAM_NAME_LEN];
-  float* value_p;
+  float *value_p;
   float default_value;
   float min_value;
   float max_value;
@@ -32,7 +46,6 @@ extern const size_t PARAMS_COUNT;
 
 esp_err_t params_init(void);
 
-bool param_set(const char* name, float value, params_entry_t* p,
-               uint16_t* id);
+bool param_set(const char *name, float value, params_entry_t *p, uint16_t *id);
 
-bool param_get(const char* name, params_entry_t* p);
+bool param_get(const char *name, params_entry_t *p);
