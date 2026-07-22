@@ -5,12 +5,20 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "flight_control.h"
-#include "imu.h"
+#include "imu/imu.h"
 #include "params.h"
 #include "signal.h"
 #include "status.h"
 #include "telemetry.h"
 #include "wifi.h"
+
+static const i2c_device_config_t i2c_imu_config = {
+    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+    .device_address = 0x68,
+    .scl_speed_hz = 400000,
+    .scl_wait_us = 0,
+    .flags.disable_ack_check = 0,
+};
 
 void app_main(void) {
   TaskHandle_t signal_handle = signal_init();
@@ -39,12 +47,13 @@ void app_main(void) {
   ESP_LOGI(CFG_LOG_TAG, "I2C bus configured");
 
   i2c_master_dev_handle_t imu_handle = nullptr;
-  ESP_ERROR_CHECK(init_imu(bus_handle, &imu_handle));
+  ESP_ERROR_CHECK(imu_init(bus_handle, &i2c_imu_config, &imu_handle));
   ESP_LOGI(CFG_LOG_TAG, "IMU device configured");
+  ESP_ERROR_CHECK(imu_configure_DLPF(DLPF_0, DLPF_1, imu_handle));
 
   ESP_LOGI(CFG_LOG_TAG, "IMU calibration, please wait");
   signal_play(SIGNAL_CALIBRATION_START);
-  ESP_ERROR_CHECK(calibrate_imu(imu_handle));
+  ESP_ERROR_CHECK(imu_calibrate(imu_handle));
   ESP_LOGI(CFG_LOG_TAG, "IMU calibration finished");
   signal_play(SIGNAL_CALIBRATION_END);
   status_sensor_set_healthy(MAV_SYS_STATUS_SENSOR_3D_GYRO | MAV_SYS_STATUS_SENSOR_3D_ACCEL |

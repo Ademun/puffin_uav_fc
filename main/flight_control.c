@@ -175,7 +175,7 @@ static void flight_control_task(void *pvParameters) {
 
     loop_count++;
 
-    esp_err_t err = read_imu_data(imu_handle, &imu_data);
+    esp_err_t err = imu_read_data(imu_handle, &imu_data);
     if (err != ESP_OK) {
       ESP_LOGW(CFG_LOG_TAG, "IMU read error: 0x%x", err);
       continue;
