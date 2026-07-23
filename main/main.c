@@ -1,6 +1,6 @@
 #include "Config.h"
 #include "Mahony.h"
-#include "comms.h"
+#include "communication/comms.h"
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -21,6 +21,7 @@ static const i2c_device_config_t i2c_imu_config = {
 };
 
 void app_main(void) {
+  esp_err_t err;
   TaskHandle_t signal_handle = signal_init();
   if (signal_handle == nullptr) {
     ESP_LOGE(CFG_LOG_TAG, "Failed to start signal");
@@ -67,8 +68,9 @@ void app_main(void) {
     return;
   }
 
-  TaskHandle_t comms_handle = communications_start();
-  if (comms_handle == nullptr) {
+  err = communications_start();
+  if (err != ESP_OK) {
+    ESP_ERROR_CHECK(err);
     ESP_LOGE(CFG_LOG_TAG, "Failed to start communications");
     return;
   }
