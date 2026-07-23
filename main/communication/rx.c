@@ -27,6 +27,8 @@ static const char *get_cmd_name(uint16_t cmd) {
     return "COMPONENT_ARM_DISARM";
   case MAV_CMD_REQUEST_MESSAGE:
     return "REQUEST_MESSAGE";
+  case MAV_CMD_SET_MESSAGE_INTERVAL:
+    return "SET_MESSAGE_INTERVAL";
   case MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES:
     return "REQUEST_AUTOPILOT_CAPABILITIES";
   default:
@@ -35,7 +37,8 @@ static const char *get_cmd_name(uint16_t cmd) {
 }
 
 static bool pack_status_text(mavlink_message_t *msg, const char *text) {
-  mavlink_msg_statustext_pack(MAV_SYSTEM_ID, MAV_COMPONENT_ID, msg, MAV_SEVERITY_WARNING, text, 0, 0);
+  mavlink_msg_statustext_pack_chan(
+      MAV_SYSTEM_ID, MAV_COMPONENT_ID, MAVLINK_RX_CHAN, msg, MAV_SEVERITY_WARNING, text, 0, 0);
   return true;
 }
 
@@ -135,21 +138,22 @@ static bool handle_cmd_request_autopilot_capabilities(const mavlink_command_long
   uint64_t uid = 0;
   uint8_t uid2[18] = {0};
 
-  mavlink_msg_autopilot_version_pack(MAV_SYSTEM_ID,
-                                     MAV_COMPONENT_ID,
-                                     &msg,
-                                     capabilities,
-                                     flight_sw_version,
-                                     middleware_sw_version,
-                                     os_sw_version,
-                                     board_version,
-                                     flight_custom_version,
-                                     middleware_custom_version,
-                                     os_custom_version,
-                                     vendor_id,
-                                     product_id,
-                                     uid,
-                                     uid2);
+  mavlink_msg_autopilot_version_pack_chan(MAV_SYSTEM_ID,
+                                          MAV_COMPONENT_ID,
+                                          MAVLINK_RX_CHAN,
+                                          &msg,
+                                          capabilities,
+                                          flight_sw_version,
+                                          middleware_sw_version,
+                                          os_sw_version,
+                                          board_version,
+                                          flight_custom_version,
+                                          middleware_custom_version,
+                                          os_custom_version,
+                                          vendor_id,
+                                          product_id,
+                                          uid,
+                                          uid2);
   mav_lock();
   mav_send(&msg);
   mav_unlock();
@@ -157,9 +161,44 @@ static bool handle_cmd_request_autopilot_capabilities(const mavlink_command_long
   return true;
 }
 
+static bool handle_cmd_set_message_interval(const mavlink_command_long_t *cmd) {
+  uint32_t msg_id = (uint32_t)cmd->param1;
+  int32_t interval_us = (int32_t)cmd->param2;
+
+  if (!tx_set_message_interval(msg_id, interval_us)) {
+    ESP_LOGW(TAG, "SET_MESSAGE_INTERVAL: unknown message id %lu", (unsigned long)msg_id);
+    send_command_ack(cmd->command, MAV_RESULT_UNSUPPORTED, 0);
+    return false;
+  }
+
+  send_command_ack(cmd->command, MAV_RESULT_ACCEPTED, 0);
+  return true;
+}
+
+static bool handle_cmd_request_message(const mavlink_command_long_t *cmd) {
+  uint32_t msg_id = (uint32_t)cmd->param1;
+
+  switch (tx_request_message(msg_id)) {
+  case TX_REQUEST_OK:
+    send_command_ack(cmd->command, MAV_RESULT_ACCEPTED, 0);
+    return true;
+  case TX_REQUEST_NOT_READY:
+    ESP_LOGW(TAG, "REQUEST_MESSAGE: message id %lu has no data yet", (unsigned long)msg_id);
+    send_command_ack(cmd->command, MAV_RESULT_TEMPORARILY_REJECTED, 0);
+    return false;
+  case TX_REQUEST_NOT_FOUND:
+  default:
+    ESP_LOGW(TAG, "REQUEST_MESSAGE: unknown message id %lu", (unsigned long)msg_id);
+    send_command_ack(cmd->command, MAV_RESULT_UNSUPPORTED, 0);
+    return false;
+  }
+}
+
 static rx_command_handler_t rx_command_handler_table[] = {
     {.mav_cmd_id = MAV_CMD_COMPONENT_ARM_DISARM, .handler_fn = handle_cmd_component_arm_disarm},
     {.mav_cmd_id = MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES, .handler_fn = handle_cmd_request_autopilot_capabilities},
+    {.mav_cmd_id = MAV_CMD_SET_MESSAGE_INTERVAL, .handler_fn = handle_cmd_set_message_interval},
+    {.mav_cmd_id = MAV_CMD_REQUEST_MESSAGE, .handler_fn = handle_cmd_request_message},
 };
 #define RX_COMMAND_HANDLER_COUNT (sizeof(rx_command_handler_table) / sizeof(rx_command_handler_t))
 

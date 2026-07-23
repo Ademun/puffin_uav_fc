@@ -25,7 +25,7 @@ void mav_send(const mavlink_message_t *msg) {
 extern void tx_task(void *pvParameters);
 extern void rx_task(void *pvParameters);
 
-esp_err_t communications_start() {
+esp_err_t communications_start(void) {
   mav_mutex = xSemaphoreCreateMutex();
   if (mav_mutex == NULL) {
     ESP_LOGE(TAG, "Failed to create mavlink mutex");
